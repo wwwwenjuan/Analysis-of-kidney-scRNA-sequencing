@@ -1,0 +1,680 @@
+library("Seurat")
+library(harmony)
+library(clustree)
+library(ggplot2)
+library(cowplot)
+library(plyr)
+library(COSG)
+library(DoubletFinder)
+
+#############################################################################
+  ## pK Identification (no ground-truth) ---------------------------------------------------------------------------------------
+  sweep.res.list_kidney <- paramSweep_v3(seurat_obj, PCs = 1:20, sct = F)
+  sweep.stats_kidney <- summarizeSweep(sweep.res.list_kidney, GT = FALSE)
+  bcmvn_kidney <- find.pK(sweep.stats_kidney)
+  pK <- bcmvn_kidney %>% # select the pK that corresponds to max bcmvn to optimize doublet detection
+    dplyr::filter(BCmetric == max(BCmetric)) %>%
+    dplyr::select(pK) 
+  pK <- as.numeric(as.character(pK[[1]]))
+  seurat_doublets <- doubletFinder_v3(seurat_obj, PCs = 1:20, pN = 0.25, pK = pK,
+                                      nExp = round(0.05*length(seurat_obj@active.ident)), 
+                                      reuse.pANN = FALSE, sct = F)
+  
+  # create doublet groupings and visualize results
+  DF.class <- names(seurat_doublets@meta.data) %>% str_subset("DF.classifications")
+  pANN <- names(seurat_doublets@meta.data) %>% str_subset("pANN")
+  
+  #p1 <- ggplot(bcmvn_kidney, aes(x=pK, y=BCmetric)) +geom_bar(stat = "identity") +  ggtitle(paste0("pKmax=",pK)) +theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  #p2 <- DimPlot(seurat_doublets, group.by = DF.class)
+  #p3 <- FeaturePlot(seurat_doublets, features = pANN)
+  
+  # create a df of barcodes and doublet designations
+  df_doublet_barcodes <- as.data.frame(cbind(rownames(seurat_doublets@meta.data), seurat_doublets@meta.data[[DF.class]]))
+  return(df_doublet_barcodes)}
+#############################################################################
+
+
+# Read the.rds data file to the sce for subsequent analysis
+sce = readRDS("WWJ.scRNA_data.rds")
+
+# Visualize the data characteristics of individual samples
+##  filter.count.feature.mt
+p_sp <- VlnPlot(sce, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by ="orig.ident")
+ggsave(filename = "filter.feature.count.mt.samples.pdf", plot = p_sp, width = 20, height = 6)
+
+
+# View the clustering effect of 0.6 resolution and also view the number and effect of clustering under other resolutions, compare and choose
+DimPlot(sce, reduction = "umap", group.by = "RNA_snn_res.0.6",   pt.size=0.1, label = TRUE,repel = TRUE)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+
+
+#Collated Marker gene summary
+first_check=list(
+	PT=c("Akr1c21","Ttc36","Ass1","Aldob","Rida","Fbp1","Miox","Cela1"),
+	PC = c("Aqp2","Hsd11b2","Fxyd4","Aqp3"),
+	IC = c("Atp6v1g3","Aqp6","Spink8","Atp6v1c2","Atp6v0d2"),
+	LOH = c("Slc12a1","Car15","Lcn2","Umod","Sostdc1","Egf","Mt1","Spp1"),
+	TL=c("Slc14a2"),
+	DT = c("Slc12a3","Tmem52b","Defb1","Calb1","Wnk1"),
+	Endo = c("Fabp4","Tm4sf1","Emcn","Flt1","Plvap"),
+	Immune=c("Ptprc"),
+	Mac=c("Adgre1","C1qa","C1qb","Cd68","Il1b"),
+	Mono=c("Itgam","Cd14","Cst3","Csf1r","Cxcr2"),
+	NK=c("Nkg7","Gzma"),
+	T=c("Cd3d","Cd3e","Cd247"),
+	B=c("Cd79a","Cd79b")
+)
+
+
+# The expression of cell type marker in each cluster was observed by bubble map
+DotPlot(sce, features = first_check, assay='RNA', group.by = "RNA_snn_res.0.6") +
+  theme(axis.text.x=element_text(angle=45,hjust=1.2,vjust = 1.1,size = 15), strip.text.x = element_text(angle=90,size = 15)) +
+  scale_color_gradientn(values = seq(0,1,0.2),colours = c('#FFCC33','#66CC66','#336699','#330066'))
+
+
+# Sort the categories
+sce@meta.data$RNA_snn_res.0.6_order = factor(sce@meta.data$RNA_snn_res.0.6, levels = c(0,1,2,3,4,5,6,7,9,10,21,13,8,19,11,16,15,12,14,22,18,17,20))
+
+# The sorted bubble map was used to observe the expression of Marker gene in cell type
+marker_dot_plot = DotPlot(sce, features = first_check, assay='RNA', group.by = "RNA_snn_res.0.6_order") +
+  theme(axis.text.x=element_text(angle=45,hjust=1.2,vjust = 1.1,size = 15), strip.text.x = element_text(angle=90,size = 15)) +
+  scale_color_gradientn(values = seq(0,1,0.2),colours = c('#FFCC33','#66CC66','#336699','#330066'))
+ggsave(filename = "marker_check.pdf", plot = marker_dot_plot, device = 'pdf', width = 45, height = 15, units = 'cm')
+
+
+#Determine the cell type of each cluster
+cluster_st = c(0,1,2,3,4,5,6,7,9,10,21,13,8,19,11,16,15,12,14,22,18,17,20)
+cell_type_st = c("PT","PT","PT","PT","PT","PT","PT","PT","PT","PT","PT","PC_IC","LOH","LOH","DT","DT","Endo","Myeloid","Myeloid","Myeloid","Myeloid","T","B")
+
+sce@meta.data$celltype_manual = mapvalues(sce@meta.data$RNA_snn_res.0.6_order, from = cluster_st, to = cell_type_st)
+
+sce@meta.data$celltype_manual_order = factor(sce@meta.data$celltype_manual, levels = c("PT","PC_IC","LOH","DT","Endo","Myeloid","T","B"))
+
+# Bubble diagram was drawn to observe the expression of cell type marker for each CellType
+marker_dot_plot_ct = DotPlot(sce, features = first_check, assay='RNA', group.by = "celltype_manual_order") +
+  theme(axis.text.x=element_text(angle=45,hjust=1.2,vjust = 1.1,size = 15), strip.text.x = element_text(angle=90,size = 15)) +
+  scale_color_gradientn(values = seq(0,1,0.2),colours = c('#FFCC33','#66CC66','#336699','#330066'))
+ggsave(filename = "marker_check.celltype.pdf", plot = marker_dot_plot_ct, device = 'pdf', width = 45, height =12, units = 'cm')
+
+
+
+# Merge umap samples, cluster distribution, and cell annotation results
+p1 <- DimPlot(sce, reduction = "umap", group.by = "orig.ident", pt.size=0.1)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+p2 <- DimPlot(sce, reduction = "umap", group.by = "celltype_manual",   pt.size=0.1, label = TRUE,repel = TRUE)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+p3 <- DimPlot(sce, reduction = "umap", group.by = "RNA_snn_res.0.6",   pt.size=0.1, label = TRUE,repel = TRUE)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+
+fig_celltype_umap <- plot_grid(p1, p2, p3, labels = c(),align = "v",ncol = 3)
+ggsave(filename = "celltype_combine.umap.pdf", plot = fig_celltype_umap, device = 'pdf', width = 48, height = 13, units = 'cm')
+
+
+
+#########################################################
+# Bars 3 in 1
+#########################################################
+barplot=function(x){
+    mydata=x
+    bardata1=as.data.frame(table(mydata$orig.ident,mydata$celltype))
+    colnames(bardata1)=c('Sample','Cell_type','Ratio')
+
+    bar1=ggplot(bardata1,aes(x=Cell_type,y=Ratio,fill=Sample))+geom_bar(position = 'fill',stat= 'identity')+theme(
+      #axis.text.y=element_blank(),
+      #x,y axis scale font
+      axis.text.x=element_text(colour="black",size=30,angle = 50,vjust = 1,hjust = 1),
+      axis.text.y=element_text(colour="black",size=30),
+      #x,y axis title font
+      #axis.title.x=element_text(size=16,colour="black", face="bold"),
+      #axis.title.y=element_text(size=24,colour="black", face="bold"),
+      #legend.title = element_text(colour="black", size=30, face="bold"),
+      legend.text = element_text(colour="black", size = 30),
+      #legend.background = element_rect(fill="gray90", size=2, linetype="dotted"),
+      panel.grid.major =element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      panel.border = element_blank(),axis.line = element_line(colour = "grey"),
+      axis.line.y = element_blank(),axis.ticks.y = element_blank(),axis.line.x =element_line(colour="black",size=2),
+      axis.ticks.x =element_line(colour="black",lineend='square',size=2)
+      
+    )+labs(x = '',y='')+coord_flip()+theme(legend.position = "top")+
+      guides(fill=guide_legend(title=NULL,ncol = 2))
+
+
+    bardata2=as.data.frame(table(mydata$sampletype,mydata$celltype))
+    colnames(bardata2)=c('Sample_type','Celltype','Ratio')
+
+    bar2=ggplot(bardata2,aes(x=Celltype,y=Ratio,fill=Sample_type))+
+      geom_bar(position = 'fill',stat= 'identity')+theme(legend.position = "top")+
+      guides(fill=guide_legend(title=NULL,ncol = 2))+theme(
+      axis.text.y=element_blank(),
+      #x,y axis scale font
+      axis.text.x=element_text(colour="black",size=30,angle = 50,vjust = 1,hjust = 1),
+      #axis.text.y=element_text(colour="black",size=18,face = "bold"),
+      #legend.title = element_text(colour="black", size=30, face="bold"),
+      legend.text = element_text(colour="black", size =30),
+      #legend.background = element_rect(fill="gray90", size=2, linetype="dotted"),
+      panel.grid.major =element_blank(), 
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      panel.border = element_blank(),axis.line = element_line(colour = "grey"),axis.line.x =element_line(colour="black",size=2),
+      axis.ticks.x =element_line(colour="black",lineend='square',size=2)
+      
+    )+labs(x = '',y='')+coord_flip()+ theme(axis.ticks.y = element_blank(), axis.text.y = element_blank(),axis.line.y = element_blank())
+
+
+    bardata3=data.frame(id=mydata@assays[["RNA"]]@data@Dimnames[[2]],celltype=mydata@meta.data[["celltype"]],
+               cluster=mydata@meta.data[["seurat_clusters"]])
+
+    bar3=ggplot(bardata3,aes(x=celltype,group=celltype))+geom_bar(stat='count',position = 'dodge')+
+      #geom_label(stat='count',aes(label=..count..), hjust=-0.1,show.legend=F,angle =90)+
+      theme(
+        #x,y axis scale font
+        axis.text.y=element_blank(),
+        axis.text.x=element_text(colour="black",size=30,angle = 50,vjust = 1,hjust = 1),
+        legend.text = element_text(colour="black", size = 30),
+        panel.grid.major =element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        panel.border = element_blank(),axis.line = element_line(colour = "grey"),axis.line.x =element_line(colour="black",size=2),
+        axis.ticks.x =element_line(colour="black",lineend='square',size=2))+labs(x = '',y='')+coord_flip()+theme(legend.position = "top")+
+        guides(fill=guide_legend(title=NULL))+ theme(axis.ticks.y = element_blank(), axis.text.y = element_blank(),axis.line.y = element_blank())
+
+    bar1+bar2+bar3
+}
+
+
+# Draw bar charts
+sce@meta.data$celltype = sce@meta.data$celltype_manual_order
+
+sp = c("A1","A2","A3","S1","S2","S3")
+sp_type =  c("A","A","A","S","S","S")
+sce@meta.data$sampletype = mapvalues(sce@meta.data$orig.ident, from = sp, to = sp_type)
+sce@meta.data$sampletype = factor(sce@meta.data$sampletype, levels = c("A","S"))
+
+pdf("sc-stat.pdf",width = 16,height=7)
+barplot(sce)
+dev.off()
+
+
+
+##########################################
+# Visualize the data characteristics of each cluster and cell type
+##########################################
+p_cl <- VlnPlot(sce, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by ="RNA_snn_res.0.6")
+ggsave(filename = "filter.feature.count.mt.cluster.pdf", plot = p_cl, width = 20, height = 6)
+
+p_cp <- VlnPlot(sce, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by ="celltype_manual")
+ggsave(filename = "filter.feature.count.mt.celltypes.pdf", plot = p_cp, width = 20, height = 6)
+
+
+##########################################
+# Calculate the highly expressed genes for each cell type
+##########################################
+
+Idents(sce) = sce@meta.data$celltype_manual_order
+
+# The characteristic genes of the cell cluster were analyzed by cosg and top100 was returned
+sce.markers.RNA.cosg.n100 <- cosg(sce,  groups='all',  assay='RNA',  slot='data',  mu=1,  n_genes_user=100)
+
+cluster_id = c()
+gene = c()
+cosg_score = c()
+for (i in colnames(sce.markers.RNA.cosg.n100$names)) {
+	n = length(sce.markers.RNA.cosg.n100$names[,i])
+	cluster_id = c(cluster_id, rep(i,n))
+	gene = c(gene, sce.markers.RNA.cosg.n100$names[,i])
+	cosg_score = c(cosg_score, sce.markers.RNA.cosg.n100$scores[,i])
+}
+cosg_marker_gene = data.frame(cluster_id, gene, cosg_score)
+
+write.table(cosg_marker_gene, "COSG.CellType.list", sep = "\t", quote = F)
+
+# 使用 FindAllMarkers 分析细胞cluster的特征基因。
+sce.markers.RNA.25 <- FindAllMarkers(sce, only.pos = T,min.pct = 0.25, logfc.threshold = 0.25)
+
+write.table(sce.markers.RNA.25, "FindAllMarkers.CellType.list", sep = "\t", quote = F)
+
+
+
+
+
+##########################################
+# Subdivision of PT cell subsets
+##########################################
+
+# Jump to the analysis directory of PT cells
+setwd("/Dir/of/PT_cell")
+
+# A subset of PT cells was extracted
+sce_sub = subset(sce,subset = celltype_manual == "PT")
+
+# Sample source, Feature number, Count number, mt proportion and other basic information of each PT cell were extracted
+meta_data = sce_sub@meta.data[,c(1:5)]
+
+# Subpopulations of PT cells were reclustered
+sce_pt = CreateSeuratObject(counts = sce_sub@assays$RNA@counts,meta.data=meta_data)
+
+my_nfeatures = 3000
+
+sce_pt <- NormalizeData(sce_pt, normalization.method =  "LogNormalize",  
+                     scale.factor = 1e4)
+GetAssay(sce_pt,assay = "RNA")
+sce_pt <- FindVariableFeatures(sce_pt, selection.method = "vst", nfeatures = my_nfeatures)  
+sce_pt <- ScaleData(sce_pt, vars.to.regress = "percent.mt") 
+sce_pt <- RunPCA(object = sce_pt, pc.genes = VariableFeatures(sce_pt)) 
+
+
+sce_harmony <- RunHarmony(sce_pt, "orig.ident")
+names(sce_harmony@reductions)
+
+# PC quantity evaluation
+ebp1 = ElbowPlot(object = sce_harmony ,  ndims = 50)
+ggsave(plot = ebp1, filename = "Ebp1.pdf", width = 6, height = 6)
+
+ebp2 = ElbowPlot(object = sce_harmony ,  ndims = 10)
+ggsave(plot = ebp2, filename = "Ebp2.pdf", width = 6, height = 6)
+
+
+# min.dist 	Adjust the dispersion degree of each cluster. The larger the cluster, the sparser the distribution. The default value is 0.3, and the value ranges from 0 to 1
+# n.neighbors	Adjust the overall distribution tightness, the larger the sparser
+# spread		When the distance between clusters is adjusted, the impact is small, and the larger the cluster, the more sparse it is
+min_dist = 0
+n_nei = 30
+my_spread = 2
+pc_n = 20
+my_res = 0.5
+
+sce_harmony <- FindNeighbors(sce_harmony, reduction = "harmony", dims = 1:pc_n)
+sce_harmony <- FindClusters(sce_harmony, resolution = my_res)
+table(sce_harmony@meta.data$seurat_clusters)
+
+
+sce_harmony <- RunUMAP(sce_harmony,  dims = 1:pc_n, reduction = "harmony", min.dist = min_dist, n.neighbors = n_nei, spread = my_spread)
+p1 = DimPlot(sce_harmony,reduction = "umap",label=T )
+ggsave(plot = p1, filename = paste0("harmony_umap.dist_",min_dist,".nei_",n_nei,".spread_",my_spread,".PC_",pc_n,".pdf"), width = 6, height = 6)
+
+sce_harmony <- RunTSNE(sce_harmony,  dims = 1:pc_n, reduction = "harmony")
+p2 = DimPlot(sce_harmony,reduction = "tsne",label=T ) 
+ggsave(plot = p2, filename = paste0("harmony_tsne.PC_",pc_n,".pdf"), width = 6, height = 6)
+
+
+p3 = DimPlot(sce_harmony, reduction = "umap", label=T, group.by=paste0("RNA_snn_res.",my_res)) 
+ggsave(plot = p3, filename = paste0("harmony_umap.PC_",pc_n,"cluster_by_",my_res,".pdf"), width = 6, height = 6) 
+
+p4 = DimPlot(sce_harmony, reduction = "umap", group.by = 'orig.ident') 
+ggsave(plot = p4, filename = paste0("harmony_umap.PC_",pc_n,"cluster_by_orig.ident.pdf"), width = 6, height = 6) 
+
+p5 = DimPlot(sce_harmony, reduction = "tsne", label=T, group.by=paste0("RNA_snn_res.",my_res)) 
+ggsave(plot = p5, filename = paste0("harmony_tsne.PC_",pc_n,"cluster_by_",my_res,".pdf"), width = 6, height = 6) 
+
+p6 = DimPlot(sce_harmony, reduction = "tsne", group.by = 'orig.ident') 
+ggsave(plot = p6, filename = paste0("harmony_tsne.PC_",pc_n,"cluster_by_orig.ident.pdf"), width = 6, height = 6) 
+
+
+# Analysis of highly expressed genes in each cluster
+Idents(sce_harmony) = sce_harmony@meta.data[,paste0("RNA_snn_res.",my_res)]
+
+sce.markers.RNA.cosg.n100 <- cosg(sce_harmony,  groups='all',  assay='RNA',  slot='data',  mu=1,  n_genes_user=100)
+
+cluster_id = c()
+gene = c()
+cosg_score = c()
+for (i in colnames(sce.markers.RNA.cosg.n100$names)) {
+	n = length(sce.markers.RNA.cosg.n100$names[,i])
+	cluster_id = c(cluster_id, rep(i,n))
+	gene = c(gene, sce.markers.RNA.cosg.n100$names[,i])
+	cosg_score = c(cosg_score, sce.markers.RNA.cosg.n100$scores[,i])
+}
+cosg_marker_gene = data.frame(cluster_id, gene, cosg_score)
+
+write.table(cosg_marker_gene, "COSG.Cluster_Marker.list", sep = "\t", quote = F)
+
+# The characteristic genes of the cell cluster were analyzed using FindAllMarkers
+sce.markers.RNA.25 <- FindAllMarkers(sce_harmony, only.pos = T,min.pct = 0.25, logfc.threshold = 0.25)
+
+write.table(sce.markers.RNA.25, "FindAllMarkers.Cluster_Marker.list", sep = "\t", quote = F)
+
+
+
+# The PT subgroups were classified according to marker gene
+PT_check = list(
+	PT=c("Akr1c21","Ttc36","Ass1","Aldob","Rida","Fbp1","Miox","Cela1"),
+	PT_injured=c("Havcr1","C3","Fgb","Cd74","Fgg"),
+	PT_new=c("Neat1","Malat1","Gm45792","Dusp1","Gm26917","Snhg11","Jun"),
+	PT_repair=c("Gdf15","Ccn1","Cxcl1","Klf6","Cxcl10"),
+	S1 = c("Slc5a12"),
+	S2 = c("Slc13a3"),
+	S3 = c("Slc16a9")
+)
+
+marker_dot_plot = DotPlot(sce_harmony, features = PT_check, assay='RNA', group.by = paste0("RNA_snn_res.",my_res), cluster.idents = T) +
+  theme(axis.text.x=element_text(angle=45,hjust=1.2,vjust = 1.1,size = 12)) + scale_color_gradientn(values = seq(0,1,0.2),colours = c('#FFCC33','#66CC66','#336699','#330066'))
+ggsave(filename = paste0("marker_dot_plot.PC_",pc_n,".pdf"), plot = marker_dot_plot, device = 'pdf', width = 26, height = 10, units = 'cm')
+
+
+# Sort a cluster
+sce_harmony@meta.data$cluster_order = factor(sce_harmony@meta.data[,paste0("RNA_snn_res.",my_res)], levels = c(6,12,9,4,8,3,1,5,10,11,7,2,0,13))
+
+marker_dot_plot_2nd = DotPlot(sce_harmony, features = PT_check, assay='RNA', group.by = "cluster_order")  +
+  theme(axis.text.x=element_text(angle=45,hjust=1.2,vjust = 1.1,size = 15)) + scale_color_gradientn(values = seq(0,1,0.2),colours = c('#FFCC33','#66CC66','#336699','#330066'))
+ggsave(filename = paste0("marker_dot_plot_sorted_cluster.PC_",pc_n,".Res_",my_res,".pdf"), plot = marker_dot_plot_2nd, device = 'pdf', width = 28, height = 11, units = 'cm')
+
+
+# Cell typing was performed
+cluster_st = c(1,2,3,4,5,6,7,8,9,10,11,12,13)
+celltype_st = c("PT-S2","PT-S1","PT-S2","PT-S1","PT-new-S1","PT-S1","PT-Injured","PT-S1","PT-new-S2","PT-new-S1","PT-S1","PT-S1","PT-repair","PT-S3")
+
+sce_harmony@meta.data$celltype_manual = mapvalues(sce_harmony@meta.data[,paste0("RNA_snn_res.",my_res)], from = cluster_st, to = celltype_st)
+
+
+
+# Look at the effects of manual cell type annotation, umap
+p5 <- DimPlot(sce_harmony, reduction = "umap", group.by = "orig.ident", pt.size=0.1)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+p6 <- DimPlot(sce_harmony, reduction = "umap", group.by = "RNA_snn_res.0.5", pt.size=0.1, label = TRUE,repel = TRUE)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+p7 <- DimPlot(sce_harmony, reduction = "umap", group.by = "celltype_manual",   pt.size=0.1, label = TRUE,repel = TRUE)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+
+fig_celltype <- plot_grid(p5, p6, p7, labels = c(),align = "v",ncol = 2)
+ggsave(filename = "celltype.umap.pdf", plot = fig_celltype, device = 'pdf', width = 27, height = 24, units = 'cm')
+
+
+
+# Draw the bubble diagram after classification
+marker_dot_plot_f1 = DotPlot(sce_harmony, features = PT_check, assay='RNA', group.by = "celltype_manual", cluster.idents = T) +
+  theme(axis.text.x=element_text(angle=45,hjust=1.2,vjust = 1.1,size = 12)) + scale_color_gradientn(values = seq(0,1,0.2),colours = c('#FFCC33','#66CC66','#336699','#330066'))
+ggsave(filename = paste0("marker_dot_plot.PC_",pc_n,".CellType.pdf"), plot = marker_dot_plot_f1, device = 'pdf', width = 25, height = 10, units = 'cm')
+
+
+# Sequence cell types
+sce_harmony@meta.data$celltype_manual_order = factor(sce_harmony@meta.data$celltype_manual, levels = c("PT-S1","PT-S2","PT-S3","PT-Injured","PT-repair","PT-new-S1","PT-new-S2"))
+
+marker_dot_plot_o1 = DotPlot(sce_harmony, features = PT_check, assay='RNA', group.by = "celltype_manual_order") +
+  theme(axis.text.x=element_text(angle=45,hjust=1.2,vjust = 1.1,size = 12)) + scale_color_gradientn(values = seq(0,1,0.2),colours = c('#FFCC33','#66CC66','#336699','#330066'))
+ggsave(filename = paste0("marker_dot_plot_order.PC_",pc_n,".CellType.pdf"), plot = marker_dot_plot_o1, device = 'pdf', width = 25, height = 10, units = 'cm')
+
+
+# Determine the cell classification results used
+Idents(sce_harmony) = sce_harmony@meta.data$celltype_manual_order
+
+## violin plot
+vln_markers2 = c("Havcr1","Itgb1","Cd36","Tnf","Il1b","Il6","Trp53")
+
+p2 <- VlnPlot(sce_harmony, vln_markers2, stack = T, flip = T, group.by = "celltype_manual_order") + theme(legend.position = "none") + ggtitle("")+xlab("")
+ggsave(filename = paste0("VlnPlot.CellType.PC_",pc_n,".pdf"), plot = p2, width = 5, height = 7)
+
+
+# Draw a 3-in-1 bar chart
+sce_harmony@meta.data$celltype = sce_harmony@meta.data$celltype_manual_order
+
+sp = c("A1","A2","A3","S1","S2","S3")
+sp_type = c("A","A","A","S","S","S")
+sce_harmony@meta.data$sampletype = mapvalues(sce_harmony@meta.data$orig.ident, from = sp, to = sp_type)
+sce_harmony@meta.data$sampletype = factor(sce_harmony@meta.data$sampletype, levels = c("A","S"))
+
+pdf("sc-stat.pdf",width = 18,height=7)
+barplot(sce_harmony)
+dev.off()
+
+
+#The highly expressed genes of each cell type were analyzed
+Idents(sce_harmony) = sce_harmony@meta.data$celltype_manual_order
+
+sce.markers.RNA.cosg.n100 <- cosg(sce_harmony,  groups='all',  assay='RNA',  slot='data',  mu=1,  n_genes_user=100)
+
+cluster_id = c()
+gene = c()
+cosg_score = c()
+for (i in colnames(sce.markers.RNA.cosg.n100$names)) {
+	n = length(sce.markers.RNA.cosg.n100$names[,i])
+	cluster_id = c(cluster_id, rep(i,n))
+	gene = c(gene, sce.markers.RNA.cosg.n100$names[,i])
+	cosg_score = c(cosg_score, sce.markers.RNA.cosg.n100$scores[,i])
+}
+cosg_marker_gene = data.frame(cluster_id, gene, cosg_score)
+
+write.table(cosg_marker_gene, "COSG.Cell_type_Marker.list", sep = "\t", quote = F)
+
+# The characteristic genes of the cell cluster were analyzed using FindAllMarkers
+sce.markers.RNA.25 <- FindAllMarkers(sce_harmony, only.pos = T,min.pct = 0.25, logfc.threshold = 0.25)
+
+write.table(sce.markers.RNA.25, "FindAllMarkers.Cell_type_Marker.list", sep = "\t", quote = F)
+
+
+
+
+
+
+
+
+##########################################
+#Myeloid cell subsets are subdivided
+##########################################
+
+# Jump to the analysis list of myeloid cells
+setwd("/Dir/of/Myeloid_cell")
+
+# A subset of PT cells was extracted
+sce_sub = subset(sce,subset = celltype_manual == "Myeloid")
+
+# Sample source, Feature number, Count number, mt proportion and other basic information of each PT cell were extracted
+meta_data = sce_sub@meta.data[,c(1:5)]
+
+
+# Subsets of myeloid cells are regrouped
+sce_Myeloid = CreateSeuratObject(counts = sce@assays$RNA@counts,meta.data=meta_data)
+
+my_nfeatures = 3000
+
+sce_Myeloid <- NormalizeData(sce_Myeloid, normalization.method =  "LogNormalize",  
+                     scale.factor = 1e4)
+GetAssay(sce_Myeloid,assay = "RNA")
+sce_Myeloid <- FindVariableFeatures(sce_Myeloid, selection.method = "vst", nfeatures = my_nfeatures)  
+sce_Myeloid <- ScaleData(sce_Myeloid, vars.to.regress = "percent.mt") 
+sce_Myeloid <- RunPCA(object = sce_Myeloid, pc.genes = VariableFeatures(sce_Myeloid)) 
+
+
+sce_harmony <- RunHarmony(sce_Myeloid, c("orig.ident","sampletype"))
+names(sce_harmony@reductions)
+
+#PC quantity evaluation
+ebp1 = ElbowPlot(object = sce_harmony ,  ndims = 50)
+ggsave(plot = ebp1, filename = "Ebp1.pdf", width = 6, height = 6)
+
+
+ebp2 = ElbowPlot(object = sce_harmony ,  ndims = 10)
+ggsave(plot = ebp2, filename = "Ebp2.pdf", width = 6, height = 6)
+
+
+# Visualize the data characteristics of individual samples
+##  filter.count.feature.mt
+p_sp <- VlnPlot(sce, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, group.by ="orig.ident")
+ggsave(filename = "filter.feature.count.mt.samples.pdf", plot = p_sp, width = 20, height = 6)
+
+##################################################
+# cluster analysis is carried out
+##################################################
+# min.dist 	Adjust the dispersion degree of each cluster. The larger the cluster, the sparser the distribution. The default value is 0.3, and the value ranges from 0 to 1
+# n.neighbors	Adjust the overall distribution tightness, the larger the sparser
+# spread		When the distance between clusters is adjusted, the impact is small, and the larger the cluster, the more sparse it is
+min_dist = 0.3
+n_nei = 30
+my_spread = 1
+pc_n = 10
+my_res = 0.15
+
+sce_harmony <- RunUMAP(sce_harmony,  dims = 1:pc_n, reduction = "harmony", min.dist = min_dist, n.neighbors = n_nei, spread = my_spread)
+p1 = DimPlot(sce_harmony,reduction = "umap", label=T, group.by=paste0("RNA_snn_res.",my_res))
+ggsave(plot = p1, filename = paste0("harmony_umap.dist_",min_dist,".nei_",n_nei,".spread_",my_spread,".PC_",pc_n,".Res_",my_res,".pdf"), width = 6, height = 6)
+
+sce_harmony <- RunTSNE(sce_harmony,  dims = 1:pc_n, reduction = "harmony")
+p2 = DimPlot(sce_harmony,reduction = "tsne", label=T, group.by=paste0("RNA_snn_res.",my_res)) 
+ggsave(plot = p2, filename = paste0("harmony_tsne.PC_",pc_n,".Res_",my_res,".pdf"), width = 6, height = 6)
+
+
+sce_harmony <- FindNeighbors(sce_harmony, reduction = "harmony", dims = 1:pc_n)
+sce_harmony <- FindClusters(sce_harmony, resolution = my_res)
+table(sce_harmony@meta.data$seurat_clusters)
+
+p3 = DimPlot(sce_harmony, reduction = "umap", label=T, group.by=paste0("RNA_snn_res.",my_res)) 
+ggsave(plot = p3, filename = paste0("harmony_umap.PC_",pc_n,"cluster_by_",my_res,".pdf"), width = 6, height = 6) 
+
+p4 = DimPlot(sce_harmony, reduction = "umap", group.by = 'orig.ident') 
+ggsave(plot = p4, filename = paste0("harmony_umap.PC_",pc_n,"cluster_by_orig.ident.pdf"), width = 6, height = 6) 
+
+p5 = DimPlot(sce_harmony, reduction = "tsne", label=T, group.by=paste0("RNA_snn_res.",my_res)) 
+ggsave(plot = p5, filename = paste0("harmony_tsne.PC_",pc_n,"cluster_by_",my_res,".pdf"), width = 6, height = 6) 
+
+p6 = DimPlot(sce_harmony, reduction = "tsne", group.by = 'orig.ident') 
+ggsave(plot = p6, filename = paste0("harmony_tsne.PC_",pc_n,"cluster_by_orig.ident.pdf"), width = 6, height = 6) 
+
+
+
+sce_harmony_All = sce_harmony
+sce_harmony = subset(sce_harmony_All, subset = RNA_snn_res.0.15 %in% c(0,1,2,3,4,5,6))
+
+
+# Sort a cluster
+sce_harmony@meta.data$cluster_order = factor(sce_harmony@meta.data[,paste0("RNA_snn_res.",my_res)], levels = c(0,5,6,3,4,1,2))
+
+first_check=list(
+	Mono = c("Ptprc","Itgam","Treml4"),
+	Mac = c("C1qa","C1qb","Fn1","Cd209a"),
+	Neutrophil = c("S100a8","S100a9","Cxcr2"),
+	Subset = c("Ly6c1","Ly6c2","Cd81")
+)
+
+marker_dot_plot_2nd = DotPlot(sce_harmony, features = first_check, assay='RNA', group.by = "cluster_order")  +
+  theme(axis.text.x=element_text(angle=45,hjust=1.2,vjust = 1.1,size = 15)) + scale_color_gradientn(values = seq(0,1,0.2),colours = c('#FFCC33','#66CC66','#336699','#330066'))
+ggsave(filename = paste0("marker_dot_plot_2nd.PC_",pc_n,".Res_",my_res,".pdf"), plot = marker_dot_plot_2nd, device = 'pdf', width = 20, height = 10, units = 'cm')
+
+
+# Marker gene expression of UMAP was drawn
+cols = c("gray", "coral2", "red")
+plot1_umap <- FeaturePlot(sce_harmony, reduction="umap", features = c("Ptprc","Itgam","Fn1","C1qa","Cxcr2","S100a8","Treml4","Ly6c2","Cd81","Cd209a"),cols = cols, pt.size = 0.1, ncol = 5)
+ggsave(filename = "Marker_umap.Mono_Mac.pdf", plot = plot1_umap, device = 'pdf', width = 60, height = 23, units = 'cm')
+
+
+
+# High-expression genes in each Cluster were analyzed
+Idents(sce_harmony) = sce_harmony@meta.data$cluster_order
+
+sce.markers.RNA.cosg.n100 <- cosg(sce_harmony,  groups='all',  assay='RNA',  slot='data',  mu=1,  n_genes_user=100)
+
+cluster_id = c()
+gene = c()
+cosg_score = c()
+for (i in colnames(sce.markers.RNA.cosg.n100$names)) {
+	n = length(sce.markers.RNA.cosg.n100$names[,i])
+	cluster_id = c(cluster_id, rep(i,n))
+	gene = c(gene, sce.markers.RNA.cosg.n100$names[,i])
+	cosg_score = c(cosg_score, sce.markers.RNA.cosg.n100$scores[,i])
+}
+cosg_marker_gene = data.frame(cluster_id, gene, cosg_score)
+
+write.table(cosg_marker_gene, paste0("COSG.Cluster_Marker.Res_",my_res,".list"), sep = "\t", quote = F)
+
+# The characteristic genes of the cell cluster were analyzed using FindAllMarkers
+sce.markers.RNA.25 <- FindAllMarkers(sce_harmony, only.pos = T,min.pct = 0.25, logfc.threshold = 0.25)
+
+write.table(sce.markers.RNA.25, paste0("FindAllMarkers.Cluster_Marker.Res_",my_res,".cutoff_0.25.list"), sep = "\t", quote = F)
+
+
+
+
+# Cell type division
+cluster_st = c(0,1,2,3,4,5,6)
+celltype_st = c("Cd81_Mac","Treml4_Mono","Neutrophil","Fn1_Mac","Cd209a_Mac","Cd81_Mac","Cd81_Mac_like")
+
+sce_harmony@meta.data$celltype_manual = mapvalues(sce_harmony@meta.data$cluster_order, from = cluster_st, to = celltype_st)
+
+#The effect of manual cell type annotation
+p5 <- DimPlot(sce_harmony, reduction = "umap", group.by = "orig.ident", pt.size=0.1)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+p6 <- DimPlot(sce_harmony, reduction = "umap", group.by = paste0("RNA_snn_res.",my_res), pt.size=0.1, label = TRUE,repel = TRUE)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+p7 <- DimPlot(sce_harmony, reduction = "umap", group.by = "celltype_manual",   pt.size=0.1, label = TRUE,repel = TRUE)+theme(
+  axis.line = element_blank(),
+  axis.ticks = element_blank(),axis.text = element_blank()
+)
+
+fig_celltype <- plot_grid(p5, p6, p7, labels = c(),align = "v",ncol = 3)
+ggsave(filename = "celltype.umap.pdf", plot = fig_celltype, device = 'pdf', width = 39, height = 12, units = 'cm')
+
+
+# Determine the cell annotation results used
+Idents(sce_harmony) = sce_harmony@meta.data$celltype_manual
+
+sce_harmony@meta.data$celltype = sce_harmony@meta.data$celltype_manual
+
+sp = c("A1","A2","A3","S1","S2","S3")
+sp_type = c("IRI","IRI","IRI","Sham","Sham","Sham")
+sce_harmony2@meta.data$sampletype = mapvalues(sce_harmony@meta.data$orig.ident, from = sp, to = sp_type)
+sce_harmony2@meta.data$sampletype = factor(sce_harmony2@meta.data$sampletype, levels = c("IRI","Sham"))
+
+pdf("sc-stat.pdf",width = 18,height=7)
+barplot(sce_harmony)
+dev.off()
+
+
+## Violin map of key genes
+vln_markers = c("Cxcr2","Csf1r","Lrp1","Cxcl16","Cxcr6","Csf2rb","Sell","Cx3cr1","Cxcl2","Ccl2","Ccl3","Ccl6","Ccl7","Ccl9","Ccl4","Ccl12","Il1b","Il16","Tgfb1")
+
+p <- VlnPlot(sce_harmony, vln_markers, stack = TRUE, flip = TRUE, group.by = "celltype_manual") + theme(legend.position = "none") + ggtitle("")+xlab("")
+ggsave(filename = paste0("VlnPlot.CellType.PC_",pc_n,".pdf"), plot = p, width = 5, height = 6)
+
+
+sce_harmony3 = subset(sce_harmony, subset = celltype_manual %in% c("Cd81_Mac","Cd81_Mac_like","Fn1_Mac","Cd209a_Mac","Treml4_Mono"))
+
+vln_markers2 = c("Spi1","Klf4","Irf8","Klf2","Nr4a1","Cebpb")
+
+p2 <- VlnPlot(sce_harmony3, vln_markers2, stack = TRUE, flip = TRUE, group.by = "celltype_manual") + theme(legend.position = "none") + ggtitle("")+xlab("")
+ggsave(filename = paste0("VlnPlot2.CellType.PC_",pc_n,".pdf"), plot = p2, width = 5, height = 4.5)
+
+
+
+
+
+# Analysis of differences in cell types
+# Set the resolution results used
+sce.markers.RNA.cosg.n100 <- cosg(sce_harmony,  groups='all',  assay='RNA',  slot='data',  mu=1,  n_genes_user=100)
+
+cluster_id = c()
+gene = c()
+cosg_score = c()
+for (i in colnames(sce.markers.RNA.cosg.n100$names)) {
+	n = length(sce.markers.RNA.cosg.n100$names[,i])
+	cluster_id = c(cluster_id, rep(i,n))
+	gene = c(gene, sce.markers.RNA.cosg.n100$names[,i])
+	cosg_score = c(cosg_score, sce.markers.RNA.cosg.n100$scores[,i])
+}
+cosg_marker_gene = data.frame(cluster_id, gene, cosg_score)
+
+write.table(cosg_marker_gene, paste0("COSG.CellType_Marker.Res_",my_res,".CellAnno.list"), sep = "\t", quote = F)
+
+# The characteristic genes of the cell cluster were analyzed using FindAllMarkers
+sce.markers.RNA.25 <- FindAllMarkers(sce_harmony, only.pos = T,min.pct = 0.25, logfc.threshold = 0.25)
+
+write.table(sce.markers.RNA.25, paste0("FindAllMarkers.CellType_Marker.Res_",my_res,".cutoff_0.25.CellAnno.list"), sep = "\t", quote = F)
+
+
